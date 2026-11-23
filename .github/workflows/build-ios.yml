@@ -1,0 +1,84 @@
+name: Build QuietGram
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+          xcodebuild -version
+          df -h .
+      - name: Check archive settings
+        env:
+          ARCHIVE_PASSWORD: ${{ secrets.IPA_PASSWORD }}
+        run: |
+          if (( ${#ARCHIVE_PASSWORD} < 20 )); then
+            echo "Set IPA_PASSWORD to at least 20 characters in Actions secrets."
+            exit 1
+          fi
+          command -v 7zz >/dev/null || brew install sevenzip
+      - name: Prepare patched sources
+        run: python3 prepare.py
+      - name: Configure client
+        working-directory: source
+        env:
+          API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          aid, ahash = os.environ["API_ID"].strip(), os.environ["API_HASH"].strip()
+          if not re.fullmatch(r"[1-9][0-9]*", aid) or not re.fullmatch(r"[0-9a-fA-F]{32}", ahash):
+              raise SystemExit("Check TELEGRAM_API_ID and TELEGRAM_API_HASH in repository secrets")
+          cfg = json.loads(pathlib.Path("build-system/template_minimal_development_configuration.json").read_text())
+          cfg.update(api_id=aid, api_hash=ahash, bundle_id="org.miklovw.QuietGram", team_id="QUIETGRAM1")
+          pathlib.Path("quietgram.json").write_text(json.dumps(cfg))
+          PY
+          cat >> .bazelrc <<'EOF'
+
+          build --//Telegram:disableExtensions
+          build --//Telegram:disableProvisioningProfiles
+          build --features=disable_legacy_signing
+          EOF
+      - name: Package without an embedded profile for AltStore
+        working-directory: source
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("build-system/bazel-rules/rules_apple/apple/internal/ios_rules.bzl")
+          s = p.read_text()
+          start = s.index("def _ios_application_impl(")
+          end = s.index("\ndef ", start + 1)
+          impl = s[start:end]
+          anchor = "if platform_prerequisites.platform.is_device:\n        processor_partials.append(\n            partials.provisioning_profile_partial("
+          if impl.count(anchor) != 1:
+              raise SystemExit("Unexpected rules_apple revision; cannot apply IPA packaging change")
+          p.write_text(s[:start] + impl.replace(anchor, anchor.replace("is_device:", "is_device and provisioning_profile:")) + s[end:])
+          PY
+      - name: Build device IPA
+        working-directory: source
+        run: |
+          python3 build-system/Make/Make.py build \
+            --configurationPath=quietgram.json \
+            --xcodeManagedCodesigning \
+            --buildNumber="$GITHUB_RUN_NUMBER" \
+            --configuration=release_arm64
+          cp -L bazel-bin/Telegram/Telegram.ipa ../QuietGram.ipa
+          unzip -tq ../QuietGram.ipa
+      - name: Encrypt IPA for download
+        env:
+          ARCHIVE_PASSWORD: ${{ secrets.IPA_PASSWORD }}
+        run: 7zz a -t7z -mx=0 -mhe=on "-p${ARCHIVE_PASSWORD}" QuietGram.7z QuietGram.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QuietGram-iOS
+          path: QuietGram.7z
+          if-no-files-found: error
+          retention-days: 3
