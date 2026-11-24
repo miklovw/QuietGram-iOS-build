@@ -102,4 +102,5 @@ text = once(text, "        statePromise.get(),",
 anchor = "    entries.append(.openLinksIn(presentationData.theme, presentationData.strings.ChatSettings_OpenLinksIn, defaultWebBrowser))"
 text = once(text, anchor, anchor + "\n    entries.append(.quietOnline(QuietGramPresenceSettings.hidden))")
 settings.write_text(text, encoding="utf-8")
+exec(compile((Path(__file__).resolve().parent / "archive_ui.py").read_bytes(), "archive_ui.py", "exec"))
 print(f"Source ready: {root}. See README.md and versions.json inside it for Xcode setup.")
